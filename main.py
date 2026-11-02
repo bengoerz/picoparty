@@ -1,4 +1,4 @@
-from machine import Pin, I2S
+from machine import Pin, I2C, I2S
 import gc
 import math
 import random
@@ -18,6 +18,16 @@ LIGHT_SEQ = (
     (green, 5000),
     (yellow, 2000),
 )
+
+# ---------------------------------------------------------------
+# Motor (DRV2605L haptic driver -> small DC/ERM motor)
+# I2C0: SDA=GP12 (pin 16), SCL=GP13 (pin 17), VIN=3V3, address 0x5A
+# ---------------------------------------------------------------
+DRV_ADDR = 0x5A
+MOTOR_ON_MS = 1000           # spin for 1 s ...
+MOTOR_OFF_MS = 5000          # ... then rest for 5 s, repeat
+MOTOR_RTP = 0x40             # real-time drive level, 0x00-0x7F (0x40 = ~50%, "low speed")
+MOTOR_ODCLAMP = 0x5D         # open-loop full-scale drive = 93 * 21.6 mV = ~2.0 V
 
 # ---------------------------------------------------------------
 # Audio settings (MAX98357A: BCLK=GP17, LRC=GP18, DIN=GP16)
@@ -151,6 +161,33 @@ def set_light(light):
             other.value(0)
 
 
+def motor_init():
+    """Set up the DRV2605L for an ERM motor in open-loop real-time-playback mode.
+    Returns (i2c, ok). The motor is optional: on any failure the music and
+    lights keep running without it."""
+    try:
+        i2c = I2C(0, sda=Pin(12), scl=Pin(13), freq=400000)
+        chip = i2c.readfrom_mem(DRV_ADDR, 0x00, 1)[0] >> 5   # 3 = DRV2605, 7 = DRV2605L
+        if chip not in (3, 7):
+            raise OSError("unexpected DRV260x id %d" % chip)
+        i2c.writeto_mem(DRV_ADDR, 0x01, b"\x00")              # leave standby
+        fb = i2c.readfrom_mem(DRV_ADDR, 0x1A, 1)[0]
+        i2c.writeto_mem(DRV_ADDR, 0x1A, bytes([fb & 0x7F]))   # N_ERM_LRA = 0 -> ERM
+        c3 = i2c.readfrom_mem(DRV_ADDR, 0x1D, 1)[0]
+        i2c.writeto_mem(DRV_ADDR, 0x1D, bytes([c3 | 0x20]))   # ERM open-loop (no calibration)
+        i2c.writeto_mem(DRV_ADDR, 0x17, bytes([MOTOR_ODCLAMP]))
+        i2c.writeto_mem(DRV_ADDR, 0x02, b"\x00")              # RTP level 0 = stopped
+        i2c.writeto_mem(DRV_ADDR, 0x01, b"\x05")              # mode: real-time playback
+        return i2c, True
+    except Exception as e:
+        print("motor disabled:", e)
+        return None, False
+
+
+def motor_set(i2c, level):
+    i2c.writeto_mem(DRV_ADDR, 0x02, bytes([level]))
+
+
 def main():
     set_light(red)                 # keep a light on while the tune renders
     gc.collect()
@@ -174,6 +211,14 @@ def main():
     light_start = time.ticks_ms()
     set_light(LIGHT_SEQ[light_idx][0])
 
+    # Motor: 1 s on, 5 s off, on its own timer like the lights
+    motor, motor_ok = motor_init()
+    motor_spinning = False
+    motor_start = time.ticks_ms()
+    if motor_ok:
+        motor_set(motor, MOTOR_RTP)
+        motor_spinning = True
+
     try:
         while True:
             for off in range(0, len(buf), CHUNK_BYTES):
@@ -185,10 +230,26 @@ def main():
                     light_start = time.ticks_add(light_start, LIGHT_SEQ[light_idx][1])
                     light_idx = (light_idx + 1) % len(LIGHT_SEQ)
                     set_light(LIGHT_SEQ[light_idx][0])
+
+                if motor_ok:
+                    span = MOTOR_ON_MS if motor_spinning else MOTOR_OFF_MS
+                    if time.ticks_diff(time.ticks_ms(), motor_start) >= span:
+                        motor_start = time.ticks_add(motor_start, span)
+                        motor_spinning = not motor_spinning
+                        try:
+                            motor_set(motor, MOTOR_RTP if motor_spinning else 0)
+                        except OSError as e:
+                            print("motor disabled:", e)   # keep the music going
+                            motor_ok = False
     except KeyboardInterrupt:
-        # Fail safe: red on, sound off
+        # Fail safe: red on, sound off, motor off
         set_light(red)
         audio.deinit()
+        if motor_ok:
+            try:
+                motor_set(motor, 0)
+            except OSError:
+                pass
 
 
 if __name__ == "__main__":
