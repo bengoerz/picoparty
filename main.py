@@ -24,9 +24,10 @@ LIGHT_SEQ = (
 # I2C0: SDA=GP12 (pin 16), SCL=GP13 (pin 17), VIN=3V3, address 0x5A
 # ---------------------------------------------------------------
 DRV_ADDR = 0x5A
-MOTOR_ON_MS = 1000           # spin for 1 s ...
-MOTOR_OFF_MS = 5000          # ... then rest for 5 s, repeat
-MOTOR_RTP = 0x19             # real-time drive level, 0x00-0x7F (0x19 = ~20%, "low speed")
+MOTOR_KICK_RTP = 0x19        # start-up drive, 0x00-0x7F (0x19 = ~20%) to overcome stiction
+MOTOR_KICK_MS = 50      # how long to hold the start-up drive
+MOTOR_HOLD_RTP = 0x0F        # running drive once spinning (0x0F = ~12%, "low speed")
+MOTOR_REKICK_MS = 10000      # repeat the kick-start this often, in case the motor quit
 MOTOR_ODCLAMP = 0x5D         # open-loop full-scale drive = 93 * 21.6 mV = ~2.0 V
 
 # ---------------------------------------------------------------
@@ -211,13 +212,13 @@ def main():
     light_start = time.ticks_ms()
     set_light(LIGHT_SEQ[light_idx][0])
 
-    # Motor: 1 s on, 5 s off, on its own timer like the lights
+    # Motor: kick-start once, then run continuously at the low hold level
     motor, motor_ok = motor_init()
-    motor_spinning = False
+    motor_kicking = False
     motor_start = time.ticks_ms()
     if motor_ok:
-        motor_set(motor, MOTOR_RTP)
-        motor_spinning = True
+        motor_set(motor, MOTOR_KICK_RTP)
+        motor_kicking = True
 
     try:
         while True:
@@ -232,12 +233,19 @@ def main():
                     set_light(LIGHT_SEQ[light_idx][0])
 
                 if motor_ok:
-                    span = MOTOR_ON_MS if motor_spinning else MOTOR_OFF_MS
-                    if time.ticks_diff(time.ticks_ms(), motor_start) >= span:
-                        motor_start = time.ticks_add(motor_start, span)
-                        motor_spinning = not motor_spinning
+                    now = time.ticks_ms()
+                    level = None
+                    if motor_kicking:
+                        if time.ticks_diff(now, motor_start) >= MOTOR_KICK_MS:
+                            motor_kicking = False     # up to speed: drop to the hold level
+                            level = MOTOR_HOLD_RTP
+                    elif time.ticks_diff(now, motor_start) >= MOTOR_REKICK_MS:
+                        motor_kicking = True          # periodic re-kick in case it stalled
+                        motor_start = now
+                        level = MOTOR_KICK_RTP
+                    if level is not None:
                         try:
-                            motor_set(motor, MOTOR_RTP if motor_spinning else 0)
+                            motor_set(motor, level)
                         except OSError as e:
                             print("motor disabled:", e)   # keep the music going
                             motor_ok = False
