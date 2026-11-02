@@ -26,7 +26,7 @@ LIGHT_SEQ = (
 DRV_ADDR = 0x5A
 MOTOR_ON_MS = 1000           # spin for 1 s ...
 MOTOR_OFF_MS = 5000          # ... then rest for 5 s, repeat
-MOTOR_RTP = 0x40             # real-time drive level, 0x00-0x7F (0x40 = ~50%, "low speed")
+MOTOR_RTP = 0x30             # real-time drive level, 0x00-0x7F (0x30 = ~38%, "low speed")
 MOTOR_ODCLAMP = 0x5D         # open-loop full-scale drive = 93 * 21.6 mV = ~2.0 V
 
 # ---------------------------------------------------------------
