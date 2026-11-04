@@ -1,6 +1,7 @@
 from machine import Pin, I2C, I2S
 import gc
 import math
+import neopixel
 import random
 import time
 
@@ -29,6 +30,14 @@ MOTOR_KICK_MS = 50      # how long to hold the start-up drive
 MOTOR_HOLD_RTP = 0x0F        # running drive once spinning (0x0F = ~12%, "low speed")
 MOTOR_REKICK_MS = 10000      # repeat the kick-start this often, in case the motor quit
 MOTOR_ODCLAMP = 0x5D         # open-loop full-scale drive = 93 * 21.6 mV = ~2.0 V
+
+# ---------------------------------------------------------------
+# NeoPixels: data on GP28 (pin 34), VCC = 5 V, shared GND
+# ---------------------------------------------------------------
+NEO_PIN = 28
+NEO_COUNT = 1
+NEO_BRIGHTNESS = 0.5         # 0.0 - 1.0
+NEO_STEP_MS = 40             # colour advances one of 255 wheel steps every 40 ms (~10 s per cycle)
 
 # ---------------------------------------------------------------
 # Audio settings (MAX98357A: BCLK=GP17, LRC=GP18, DIN=GP16)
@@ -189,6 +198,25 @@ def motor_set(i2c, level):
     i2c.writeto_mem(DRV_ADDR, 0x02, bytes([level]))
 
 
+def wheel(pos):
+    """Map 0-254 around the colour wheel (red -> green -> blue -> red)."""
+    if pos < 85:
+        return (255 - pos * 3, pos * 3, 0)
+    if pos < 170:
+        pos -= 85
+        return (0, 255 - pos * 3, pos * 3)
+    pos -= 170
+    return (pos * 3, 0, 255 - pos * 3)
+
+
+def neo_show(np, pos):
+    r, g, b = wheel(pos)
+    color = (int(r * NEO_BRIGHTNESS), int(g * NEO_BRIGHTNESS), int(b * NEO_BRIGHTNESS))
+    for i in range(NEO_COUNT):
+        np[i] = color
+    np.write()
+
+
 def main():
     set_light(red)                 # keep a light on while the tune renders
     gc.collect()
@@ -220,6 +248,12 @@ def main():
         motor_set(motor, MOTOR_KICK_RTP)
         motor_kicking = True
 
+    # NeoPixels: slow colour cycle at 50% brightness, on its own timer
+    neo = neopixel.NeoPixel(Pin(NEO_PIN), NEO_COUNT)
+    neo_pos = 0
+    neo_last = time.ticks_ms()
+    neo_show(neo, neo_pos)
+
     try:
         while True:
             for off in range(0, len(buf), CHUNK_BYTES):
@@ -231,6 +265,11 @@ def main():
                     light_start = time.ticks_add(light_start, LIGHT_SEQ[light_idx][1])
                     light_idx = (light_idx + 1) % len(LIGHT_SEQ)
                     set_light(LIGHT_SEQ[light_idx][0])
+
+                if time.ticks_diff(time.ticks_ms(), neo_last) >= NEO_STEP_MS:
+                    neo_last = time.ticks_add(neo_last, NEO_STEP_MS)
+                    neo_pos = (neo_pos + 1) % 255
+                    neo_show(neo, neo_pos)
 
                 if motor_ok:
                     now = time.ticks_ms()
@@ -253,6 +292,8 @@ def main():
         # Fail safe: red on, sound off, motor off
         set_light(red)
         audio.deinit()
+        neo.fill((0, 0, 0))
+        neo.write()
         if motor_ok:
             try:
                 motor_set(motor, 0)
